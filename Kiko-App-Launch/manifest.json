@@ -1,0 +1,21 @@
+{
+  "name": "Kiko AI Companion",
+  "short_name": "Kiko AI",
+  "description": "Your Eager Little Brother AI Companion powered by Gemini.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "/images/kiko-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/images/kiko-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

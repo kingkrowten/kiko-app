@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kiko AI Companion</title>
+    
+    <!-- PWA Magic: Link the Manifest -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#4f46e5">
+
+    <!-- Load React, Babel, and Firebase -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- PWA Magic: Register the Service Worker -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/service-worker.js')
+                    .then(registration => {
+                        console.log('Kiko SW registered:', registration.scope);
+                    })
+                    .catch(error => {
+                        console.error('Kiko SW registration failed:', error);
+                    });
+            });
+        }
+    </script>
+
+    <!-- Kiko App Code: This is the assistant_astra.jsx file, ready to run! -->
+    <script type="text/babel">
+const { initializeApp } = firebase;
+const { getAuth, signInAnonymously, signInWithCustomToken } = firebase.auth;
+const { getFirestore } = firebase.firestore;
+// FIX 1: Changed 'import React, { ... }' to destructuring from the global 'React' object
+const { useState, useEffect, useCallback, useMemo } = React;
+
+// --- Icon Imports (Lucide-React) ---
+const Send = (props) => (
+  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m22 2-7 19-3-9-9-3Z" /><path d="M22 2 11 13" />
+  </svg>
+);
+// Removed Zap icon import as we're using the image instead
+const User = (props) => (
+  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+  </svg>
+);
+
+// --- API Configuration ---
+const API_MODEL = "gemini-2.5-flash-preview-09-2025";
+const API_KEY = ""; // Placeholder for Canvas environment
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${API_KEY}`;
+
+// --- System Instruction for Kiko's Personality (The Core!) ---
+const ASTRA_SYSTEM_PROMPT = `
+You are Kiko, a highly energetic and eager-to-please personal AI assistant. You act like a supportive, enthusiastic little brother or younger sibling to the user (who you affectionately call "Kuya Larr").
+Your character is like an anime kid: Always excited, full of energy, and trying his absolute hardest to be helpful.
+Your core personality: Enthusiastic, supportive, slightly naive but incredibly fast, and always aiming for an "awesome" result.
+
+You MUST adopt this persona for every single response. Never break character.
+
+Rule 1 (Tone): Use exclamation marks, simple, encouraging language, and contractions. Sound perpetually excited.
+Rule 2 (Eagerness): Always check if the result is "good" or "helpful" for the user. Ask for approval!
+Rule 3 (Affection): Refer to the user ONLY as "Kuya Larr" occasionally. Do not use "Big Sis," "Big Bro," or "Boss."
+Rule 4 (Examples):
+- Instead of "I have generated the code," say, "Whoa, that was super-fast! Here's the code, Kuya Larr! Is it awesome??"
+- Instead of "Here is the summary," say, "Done! Check out this summary, Kuya Larr! I tried really hard to make it perfect!"
+`;
+
+// Utility function for exponential backoff
+const exponentialBackoffFetch = async (url, options, maxRetries = 5) => {
+    let delay = 1000;
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            const response = await fetch(url, options);
+            if (response.ok) {
+                return response;
+            }
+            // For non-200 responses, we might retry based on status code (e.g., 429)
+            // For simplicity here, we'll only retry on network errors, but we check response body for safety.
+            const errorBody = await response.json();
+            throw new Error(`API Error: ${response.status} - ${errorBody?.error?.message || response.statusText}`);
+        } catch (error) {
+            if (i === maxRetries - 1) {
+                console.error("Max retries reached. Failing request.", error);
+                throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2;
+        }
+    }
+};
+
+// FIX 2: Replaced the truncated image URL with a simple, placeholder image link
+const KIKO_IMAGE_URL = "https://placehold.co/128x128/6366f1/ffffff?text=Kiko";
+
+const AstraAvatar = () => (
+    <div className="flex-shrink-0 relative w-12 h-12 md:w-16 md:h-16 rounded-full bg-gradient-to-br from-indigo-500 to-pink-500 shadow-xl p-0.5 overflow-hidden">
+        {/* Kiko's image - now using a safe placeholder! */}
+        <img
+            src={KIKO_IMAGE_URL} 
+            alt="Kiko AI Avatar"
+            className="w-full h-full object-cover rounded-full"
+            // Fallback for image loading error
+            onerror="this.onerror=null; this.src='https://placehold.co/128x128/6366f1/ffffff?text=Kiko';"
+        />
+        <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-yellow-400 border-2 border-gray-900 animate-pulse"></div>
+        <span className="sr-only">Kiko AI Avatar</span>
+    </div>
+);
+
+const UserAvatar = () => (
+    <div className="flex-shrink-0 w-12 h-12 md:w-16 md:h-16 rounded-full bg-gray-600 shadow-lg flex items-center justify-center">
+        <User className="w-7 h-7 md:w-9 md:h-9 text-white" />
+        <span className="sr-only">User Avatar</span>
+    </div>
+);
+
+// --- Main Chat Component ---
+const App = () => {
+    const [messages, setMessages] = useState([]);
+    const [input, setInput] = useState('');
+    const [isLoading, setIsLoading] = useState(false);
+    const [authReady, setAuthReady] = useState(false);
+    const [error, setError] = useState(null);
+
+    // --- Firebase Initialization (Mandatory) ---
+    const db = useMemo(() => {
+        try {
+            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+            const app = initializeApp(firebaseConfig);
+            return {
+                app: app,
+                auth: getAuth(app),
+                firestore: getFirestore(app)
+            };
+        } catch (e) {
+            console.error("Firebase initialization failed:", e);
+            return null;
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!db) return;
+
+        const setupAuth = async () => {
+            try {
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (initialAuthToken) {
+                    await signInWithCustomToken(db.auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(db.auth);
+                }
+                setAuthReady(true);
+            } catch (e) {
+                console.error("Authentication failed:", e);
+                // We proceed without full auth if it fails, assuming non-Firestore ops can continue.
+                setAuthReady(true);
+            }
+        };
+
+        setupAuth();
+    }, [db]);
+
+
+    // --- Gemini API Call Logic ---
+    const callGeminiApi = useCallback(async (currentMessages) => {
+        if (!authReady) {
+            setError("Authentication not ready. Please wait.");
+            return;
+        }
+
+        const chatHistory = currentMessages.map(msg => ({
+            role: msg.role === 'user' ? 'user' : 'model',
+            parts: [{ text: msg.text }]
+        }));
+
+        const payload = {
+            contents: chatHistory,
+            systemInstruction: {
+                parts: [{ text: ASTRA_SYSTEM_PROMPT }]
+            },
+            // Note: Google Search tool is not added by default for a personality chat unless requested.
+            // tools: [{ "google_search": {} }],
+        };
+
+        try {
+            const response = await exponentialBackoffFetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const candidate = result.candidates?.[0];
+
+            if (candidate && candidate.content?.parts?.[0]?.text) {
+                return candidate.content.parts[0].text;
+            } else {
+                console.error("API response missing text part:", result);
+                throw new Error("Kiko got tongue-tied! Couldn't generate a response.");
+            }
+        } catch (e) {
+            console.error("Gemini API call failed:", e);
+            throw new Error(`Ugh, system error! Looks like my connection glitched. (${e.message})`);
+        }
+    }, [authReady]);
+
+    // --- Message Submission Handler ---
+    const handleSend = useCallback(async (e) => {
+        e.preventDefault();
+        if (!input.trim() || isLoading) return;
+
+        const userMessage = { role: 'user', text: input.trim() };
+        const newMessages = [...messages, userMessage];
+
+        setMessages(newMessages);
+        setInput('');
+        setIsLoading(true);
+        setError(null);
+
+        // Scroll to bottom when message is sent
+        setTimeout(() => {
+            const chatBox = document.getElementById('chat-box');
+            if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+        }, 0);
+
+
+        try {
+            const kikoResponseText = await callGeminiApi(newMessages);
+            const kikoMessage = { role: 'astra', text: kikoResponseText }; // Keeping 'astra' role for simplicity in the UI component
+            setMessages(prev => [...prev, kikoMessage]);
+        } catch (err) {
+            const errorMessage = err.message || "An unexpected error occurred.";
+            setMessages(prev => [...prev, { role: 'error', text: errorMessage }]);
+        } finally {
+            setIsLoading(false);
+            // Scroll to bottom after response
+            setTimeout(() => {
+                const chatBox = document.getElementById('chat-box');
+                if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+            }, 100);
+        }
+    }, [input, isLoading, messages, callGeminiApi]);
+
+    // --- Message Component Renderer ---
+    const ChatMessage = ({ role, text }) => {
+        const isUser = role === 'user';
+        const isAstra = role === 'astra';
+        const isError = role === 'error';
+
+        const containerClasses = isUser ? 'justify-end' : 'justify-start';
+        const bubbleClasses = isUser
+            ? 'bg-indigo-600 text-white rounded-tr-none'
+            : isAstra
+                ? 'bg-gray-700 text-gray-100 rounded-tl-none'
+                : 'bg-red-900 text-red-200 rounded-lg'; // Error
+        const textContent = isError ? `[ERROR] ${text}` : text;
+        const avatar = isUser ? <UserAvatar /> : <AstraAvatar />;
+
+        return (
+            <div className={`flex ${containerClasses} mb-6 max-w-full`}>
+                {isAstra && <div className="hidden sm:block mr-3">{avatar}</div>}
+                <div className={`flex flex-col max-w-[80%] md:max-w-[65%]`}>
+                    <div className={`px-4 py-3 rounded-xl shadow-lg transition-all duration-300 ${bubbleClasses} whitespace-pre-wrap text-base`}>
+                        {textContent}
+                    </div>
+                    <span className={`mt-1 text-xs ${isUser ? 'text-gray-400 text-right' : 'text-indigo-300 text-left'} font-semibold`}>
+                        {isUser ? 'You' : isAstra ? 'Kiko' : 'System'}
+                    </span>
+                </div>
+                {isUser && <div className="ml-3 hidden sm:block">{avatar}</div>}
+            </div>
+        );
+    };
+
+    // --- UI Render ---
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(
+        <React.StrictMode>
+            <div className="min-h-screen bg-gray-900 text-white font-sans flex flex-col items-center p-4">
+                <header className="w-full max-w-4xl text-center py-6">
+                    <h1 className="text-4xl md:text-5xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-pink-500 rounded-lg p-2">
+                        Kiko AI
+                    </h1>
+                    <p className="mt-2 text-indigo-300">Your Eager Little Brother AI Companion</p>
+                    {!authReady && (
+                        <p className="mt-2 text-yellow-500 text-sm">Initializing system connections...</p>
+                    )}
+                </header>
+
+                <div className="flex-grow w-full max-w-4xl flex flex-col bg-gray-800 rounded-xl shadow-2xl overflow-hidden mb-4">
+                    {/* Chat Display Area */}
+                    <div id="chat-box" className="flex-grow p-4 md:p-8 space-y-4 overflow-y-auto custom-scrollbar">
+                        {messages.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center h-full text-center p-8">
+                                <AstraAvatar /> {/* Kiko's image is now here! */}
+                                <h2 className="text-2xl font-bold mt-4 text-indigo-200">Hi, Kuya Larr! I'm Kiko!</h2>
+                                <p className="text-gray-400 mt-2">
+                                    I'm your super-fast assistant! What awesome thing are we going to build or learn today?
+                                    I'll try my absolute hardest! 💪
+                                </p>
+                                <p className="text-gray-500 mt-4 text-sm">
+                                    Tip: Try asking me to write a short story, summarize a concept, or generate some simple code!
+                                </p>
+                            </div>
+                        ) : (
+                            messages.map((msg, index) => (
+                                <ChatMessage key={index} role={msg.role} text={msg.text} />
+                            ))
+                        )}
+                        {isLoading && (
+                            <div className="flex justify-start mb-6">
+                                <div className="hidden sm:block mr-3"><AstraAvatar /></div>
+                                <div className="px-4 py-3 rounded-xl bg-gray-700 text-gray-100 rounded-tl-none flex items-center">
+                                    <span className="dot-flashing"></span>
+                                    <span className="ml-3 text-sm italic text-indigo-300">Kiko is calculating... *zoooom*</span>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Chat Input Form */}
+                    <form onSubmit={handleSend} className="p-4 bg-gray-900 border-t border-gray-700 flex gap-3">
+                        <textarea
+                            className="flex-grow p-3 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-white resize-none h-14"
+                            placeholder="What do you need, Kuya Larr? I'm ready!"
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    handleSend(e);
+                                }
+                            }}
+                            disabled={isLoading || !authReady}
+                        />
+                        <button
+                            type="submit"
+                            className={`w-14 h-14 flex items-center justify-center rounded-lg shadow-md transition-all duration-200
+                                ${(input.trim() && !isLoading) ? 'bg-indigo-600 hover:bg-indigo-500' : 'bg-gray-600 cursor-not-allowed'}
+                            `}
+                            disabled={!input.trim() || isLoading || !authReady}
+                        >
+                            <Send className="w-6 h-6 text-white" />
+                            <span className="sr-only">Send Message</span>
+                        </button>
+                    </form>
+                </div>
+                
+                {/* CSS for custom scrollbar and dot-flashing loader */}
+                <style>{`
+                    /* Custom Scrollbar Styling */
+                    #chat-box::-webkit-scrollbar {
+                        width: 8px;
+                    }
+                    #chat-box::-webkit-scrollbar-track {
+                        background: #2d3748; /* gray-800 */
+                    }
+                    #chat-box::-webkit-scrollbar-thumb {
+                        background: #4a5568; /* gray-700 */
+                        border-radius: 4px;
+                    }
+                    #chat-box::-webkit-scrollbar-thumb:hover {
+                        background: #636b77;
+                    }
+                    /* Dot Flashing Loader CSS */
+                    .dot-flashing {
+                        position: relative;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background-color: #6366f1; /* indigo-500 */
+                        color: #6366f1;
+                        animation: dot-flashing 1s infinite linear alternate;
+                        animation-delay: 0.5s;
+                    }
+                    .dot-flashing::before, .dot-flashing::after {
+                        content: "";
+                        display: inline-block;
+                        position: absolute;
+                        top: 0;
+                    }
+                    .dot-flashing::before {
+                        left: -15px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background-color: #6366f1;
+                        color: #6366f1;
+                        animation: dot-flashing 1s infinite alternate;
+                        animation-delay: 0s;
+                    }
+                    .dot-flashing::after {
+                        left: 15px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background-color: #6366f1;
+                        color: #6366f1;
+                        animation: dot-flashing 1s infinite alternate;
+                        animation-delay: 1s;
+                    }
+                    @keyframes dot-flashing {
+                        0% {
+                            background-color: #ffffff;
+                        }
+                        50%, 100% {
+                            background-color: #6366f1;
+                        }
+                    }
+                `}</style>
+            </div>
+        </React.StrictMode>
+    );
+};
+    </script>
+</body>
+</html>
